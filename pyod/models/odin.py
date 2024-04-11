@@ -17,8 +17,11 @@ import numpy as np
 from numpy import percentile
 from sklearn.neighbors import BallTree
 from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics import DistanceMetric
+from sklearn.decomposition import PCA
 from sklearn.utils import check_array
 from sklearn.utils.validation import check_is_fitted
+
 
 
 from sklearn.utils import check_array
@@ -47,7 +50,7 @@ class ODIN(BaseDetector):
         The amount of contamination of the data set,
         i.e. the proportion of outliers in the data set. Used when fitting to
         define the threshold on the decision function. In this specific algorithm, contamination
-        is the T indegree parameter
+        contributes 
         
     n_neighbors : int, optional (default = 5)
         Number of neighbors to use by default for k neighbors queries.
@@ -144,7 +147,8 @@ class ODIN(BaseDetector):
     def __init__(self, contamination=0.1, n_neighbors=10, mode='auto', indegree_t=1, method='largest',
                 radius=1.0,
                 leaf_size=30, metric='minkowski', p=2, metric_params=None, 
-                n_jobs=1, **kwargs):
+                n_jobs=1):
+        
         super(ODIN,self).__init__(contamination=contamination)
         self.n_neighbors=n_neighbors
         self.mode = mode
@@ -157,22 +161,19 @@ class ODIN(BaseDetector):
         self.t = 1 - self.contamination
         self.metric_params = metric_params
         self.n_jobs = n_jobs
+        self.neigh_ = None
+        self.tree_ = None
         
         if self.mode != 'auto' or self.mode != 'manual': 
             warn('There are only "auto" and "manual" mode'
                  ' in this run, "auto" will be used.',
                  RuntimeWarning)
-        
-    
-        self.neigh_ = NearestNeighbors(n_neighbors=self.n_neighbors,
-                                    radius=self.radius,
-                                    algorithm='ball_tree',
-                                    leaf_size=self.leaf_size,
-                                    metric=self.metric,
-                                    p=self.p,
-                                    metric_params=self.metric_params,
-                                    n_jobs=self.n_jobs,
-                                    **kwargs)
+            
+        # covariance matrix V of X (set to None, if "mahalanobis distance" is used)
+        if self.metric == 'mahalanobis':
+            self.V = None
+            # custom metric (used to calculate Mahalanobis distance)
+            self.c_metric = None
         
         
     def fit(self, X, y=None):
@@ -193,20 +194,48 @@ class ODIN(BaseDetector):
         """
         # validate inputs X and y (optional)
         X = check_array(X)
-        
-        
+                    
         self._set_n_classes(y)
         
-        self.tree_ = BallTree(X)
-        
-        if self.metric_params is not None:
-            self.tree_ = BallTree(X, leaf_size=self.leaf_size,
-                                      metric=self.metric,
-                                      **self.metric_params)
+        #TODO: DON'T USE MAHALANOBIS DISTANCE
+        if self.metric == 'mahalanobis':
+            #calculates the transposed covariance matrix for X
+            self.V = np.cov(X, rowvar=False)
+            #create the metric container for mahalanobis
+            self.c_metric = DistanceMetric.get_metric(metric=self.metric, V=self.V)
+            
+            self.neigh_ = NearestNeighbors(n_neighbors=self.n_neighbors,
+                                        radius=self.radius,
+                                        algorithm='brute',
+                                        leaf_size=self.leaf_size,
+                                        metric=self.c_metric,
+                                        p=self.p,
+                                        metric_params=self.metric_params,
+                                        n_jobs=self.n_jobs,
+                                        )
         else:
-            self.tree_ = BallTree(X, leaf_size=self.leaf_size,
-                                    metric=self.metric)
-        
+            
+            self.neigh_ = NearestNeighbors(n_neighbors=self.n_neighbors,
+                                        radius=self.radius,
+                                        algorithm='ball_tree',
+                                        leaf_size=self.leaf_size,
+                                        metric=self.metric,
+                                        p=self.p,
+                                        metric_params=self.metric_params,
+                                        n_jobs=self.n_jobs,
+                                        )
+            
+            
+            self.tree_ = BallTree(X)
+            
+            if self.metric_params is not None:
+                self.tree_ = BallTree(X, leaf_size=self.leaf_size,
+                                        metric=self.metric,
+                                        **self.metric_params)
+            else:
+                self.tree_ = BallTree(X, leaf_size=self.leaf_size,
+                                        metric=self.metric)
+            
         
         self.neigh_.fit(X)
         
@@ -215,31 +244,28 @@ class ODIN(BaseDetector):
         all_dist, _ = self.neigh_.kneighbors(n_neighbors=self.n_neighbors,
                                              return_distance=True)
         
-        #Apply the selected distance method (largest,mean or median) to obtain l-dist value
-        l_dist = self._get_dist_by_method(all_dist)   
+        #Apply the selected distance method and update the l-value distance vector
+        self.l_dist = self._get_dist_by_method(all_dist)
         
-        self.l_dist = l_dist
+        self.threshold_ = self._calc_threshold()
         
-        #print(np.mean(l_dist))
+        #Calculate the indegree score: the functionality is inverse than the original "indegree score"
+        #due tu API consistency (higher the indegree score, higher the outlierness probability in pyOD)
+        #indegree_ij = 1 if dist_i > mean(l_dist) else 0 
+        #indegree_i = sum(j=i to dim(X)) indegree_ij 
         
-        indegree_scores = np.zeros([X.shape[0]])
-        
-        for i in range(all_dist.shape[0]):
-            dist_point_features = np.asarray(all_dist[i]).reshape(1, all_dist[i].shape[0])
-            #dist_point = self._get_dist_by_method(dist_point_features)
-            indegree_score = np.sum(dist_point_features > np.mean(l_dist), axis=1)
-            
-            #print(indegree_score)
-            
-            
-            indegree_scores[i] = indegree_score
-      
-        
-        self.decision_scores_ = indegree_scores.ravel()
+        self.decision_scores_ = self._calc_indegree(all_dist)
         
         self._process_decision_scores()
                     
         return self
+    
+    def _norm_vector(self,v):
+        
+        min_val = np.min(v)
+        max_val = np.max(v)
+        
+        return (v-min_val)/(max_val - min_val)
     
     def _calc_threshold(self):
         """Internal function to calculate indegree threshold T
@@ -250,7 +276,7 @@ class ODIN(BaseDetector):
         - L is the distance function (largest,mean or median) applied on the i-eth data point
         - t is the indegree threshold importance (1 - contamination)
         
-        (L(X) is self.tot_dist,the value obtained by applying _gest_dist_by_method 
+        (L(X) is self.l_dist,the value obtained by applying _gest_dist_by_method 
         on the distances found by kNN algorithm)
         
         Parameters
@@ -263,9 +289,7 @@ class ODIN(BaseDetector):
         ------- 
         indegree_t: indegree_threshold
         
-        """
-        #TODO: complete method
-        
+        """        
         if self.l_dist.shape[0] < 2: 
             raise ValueError("The number of data points is too small.")
             
@@ -274,10 +298,14 @@ class ODIN(BaseDetector):
             
         indegree_t = np.amax(differences) * self.t
         
+        print("indegree_threshold: " + str(indegree_t))
+        
+        #print(indegree_t)
         return indegree_t
         
-    
-    
+    #TODO: check the "correctness" of the assumption proposed (the contamination gives "importance" to the threshold)
+    #TODO: delete if necessary (i've normalized the scores)
+    #ODIN Overrides _process_decision_scores because the percentile is not accurate as it should be
     def _process_decision_scores(self):
         """Internal function to calculate key attributes:
         
@@ -302,19 +330,12 @@ class ODIN(BaseDetector):
         """
 
         if isinstance(self.contamination, (float, int)):
-            
-            self.threshold_ = 0
-            
-            if self.mode == 'auto': #auto mode invokes the internal method _calc_threshold
-                self.threshold_ = self._calc_threshold()
-                #TODO: remove (for debug reasons)
-                #print(self.threshold_)
+                        
+            if self.mode == 'auto': #uses the threshold calculated by the internal method _calc_threshold
                 self.labels_ = (self.decision_scores_ > self.threshold_).astype(
                     'int').ravel()
             else:
                 self.threshold_ = self.indegree_t
-                #TODO: remove (for debug reasons)
-                #print(self.threshold_)
                 self.labels_ = (self.decision_scores_ > self.threshold_).astype(
                     'int').ravel()
         # if this is a PyThresh object
@@ -331,8 +352,7 @@ class ODIN(BaseDetector):
 
         return self
     
-    
-    
+        
     def decision_function(self, X):
         """Predict raw anomaly score of X using the fitted detector.
 
@@ -351,62 +371,103 @@ class ODIN(BaseDetector):
         anomaly_scores : numpy array of shape (n_samples,)
             The anomaly score of the input samples.
         """
+        
         check_is_fitted(self, ['tree_', 'decision_scores_',
                                'threshold_', 'labels_'])
 
         X = check_array(X)
         
-        #Find the kneighbors to calculate the distances across all datapoints
-        
-        all_dist, _ = self.tree_.query(X,k=self.n_neighbors)
-        
-        #Apply the selected distance method
-        l_dist = self._get_dist_by_method(all_dist)        
-        #dist = self._get_dist_by_method(dist_arr)
-        #TODO: remove, only for testing reason
-        #print(np.mean(l_dist))
-        #update the l-value distance vector
-        self.l_dist = l_dist
-        
-        #update the threshold
-        self.threshold_ = self._calc_threshold()
-        
-        #Calculate the in-degree for each data point
-        indegree_scores = np.zeros([X.shape[0]])
-        
-        # initialize the in_degree score
-        for i in range(all_dist.shape[0]):
-            dist_point_features = np.asarray(all_dist[i]).reshape(1, all_dist[i].shape[0])
-            #dist_point = self._get_dist_by_method(dist_point_features)
-            indegree_score = np.sum(dist_point_features > np.mean(l_dist), axis=1)
-            #TODO: remove, only for testing reasons
-            #print(indegree_score)
-            indegree_scores[i] = indegree_score
-        
+        if self.metric != 'mahalanobis':
+            #Find the kneighbors to calculate the distances across all datapoints
+            all_dist, _ = self.tree_.query(X,k=self.n_neighbors)
+            
+            #Apply the selected distance method and update the l-value distance vector
+            self.l_dist = self._get_dist_by_method(all_dist)
+            
+            #update the threshold
+            self.threshold_ = self._calc_threshold()
+            
+            return self._calc_indegree(all_dist).ravel()
+            
+        else:
+            #Find the kneighbors to calculate the distances across all datapoints
+            all_dist, _ = self.neigh_.kneighbors(X,k=self.n_neighbors,return_distance=True)
+       
+            #Apply the selected distance method and update the l-value distance vector
+            self.l_dist = self._get_dist_by_method(all_dist)
+            
+            #update the threshold
+            self.threshold_ = self._calc_threshold()
+            
+            return self._calc_indegree(all_dist).ravel()
 
-        return indegree_scores.ravel()
-    
+
+           
+    def _calc_indegree(self,d_matrix):
+        """ #TODO: comment
+        
+        Parameters
+        ----------
+        d_matrix : numpy array with shape (n_samples,n_neighbors)
+        
+        Distance Matrix
+        
+        Returns
+        -------
+        indegree_scores : indegree score for each data point (the calculation is modified in order to get 
+        API consistency: "the higher outlierness is represented by high score for each data point")
+        
+        """
+        indegree_scores = np.zeros([d_matrix.shape[0]])
+        
+        print("mean distance: " + str(np.mean(self.l_dist)))
+        
+        for i in range(d_matrix.shape[0]):
+            dist_point_features = np.asarray(d_matrix[i]).reshape(1, d_matrix[i].shape[0])
+            #the indegree number functionality is the opp
+            indegree_number = np.sum(dist_point_features > self.threshold_, axis=1)
+            #TODO: remove
+            #print(dist_point_features)
+            #TODO: experimental
+            
+            #use the scores as "weights" of distances 
+            #E.G: in(i)=w_i*mean(dist_features[i])
+            
+            if indegree_number == 0:
+                indegree_scores[i] = self.contamination * np.mean(dist_point_features)
+            else:
+                indegree_scores[i] = indegree_number * np.mean(dist_point_features)
+             
+        return (indegree_scores).ravel()
          
     def _get_dist_by_method(self, dist_arr):
         """Internal function to decide how to process passed in distance array
 
         Parameters
         ----------
-        dist_arr : numpy array of shape (n_samples, n_neighbors)
-            Distance matrix.
+        dist_arr : numpy array of two possible shapes (n_samples, n_neighbors) or (n_samples,)
+            Distance matrix or Distance vector
 
         Returns
         -------
-        dist : numpy array of shape (n_samples,)
+        dist : numpy array of shape (n_samples,) or float64 value 
             The outlier scores by distance.
         """
-
-        if self.method == 'largest':
-            return dist_arr[:, -1]
-        elif self.method == 'mean':
-            return np.mean(dist_arr, axis=1)
-        elif self.method == 'median':
-            return np.median(dist_arr, axis=1)
+        if len(dist_arr.shape) == 2:
+            if self.method == 'largest':
+                return dist_arr[:, -1]
+            elif self.method == 'mean':
+                return np.mean(dist_arr, axis=1)
+            elif self.method == 'median':
+                return np.median(dist_arr, axis=1)
+        elif len(dist_arr.shape) == 1:
+            if self.method == 'largest':
+                return dist_arr[-1]
+            elif self.method == 'mean':
+                return np.mean(dist_arr, axis=0)
+            elif self.method == 'median':
+                return np.median(dist_arr, axis=0)
+            
     
     
    
