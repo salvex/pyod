@@ -297,60 +297,9 @@ class ODIN(BaseDetector):
                        for i in range(1,self.l_dist.shape[0])]
             
         indegree_t = np.amax(differences) * self.t
-        
-        print("indegree_threshold: " + str(indegree_t))
-        
-        #print(indegree_t)
+    
         return indegree_t
-        
-    #TODO: check the "correctness" of the assumption proposed (the contamination gives "importance" to the threshold)
-    #TODO: delete if necessary (i've normalized the scores)
-    #ODIN Overrides _process_decision_scores because the percentile is not accurate as it should be
-    def _process_decision_scores(self):
-        """Internal function to calculate key attributes:
-        
-        Lightly modified in order to achieve correct threshold value: 
-        
-        T = max(L(X[i])-L(X[i-1])) * contamination 
-        
-        where L is the distance function (largest,mean or median) applied on the i-eth data point
-        
-        (L(X) is self.l_dist,the value obtained by applying _gest_dist_by_method 
-        on the distances found by kNN algorithm)
-        
-        Parameters
-        ----------
-        
-        - threshold_: used to decide the binary label
-        - labels_: binary labels of training data
-
-        Returns
-        -------
-        self
-        """
-
-        if isinstance(self.contamination, (float, int)):
-                        
-            if self.mode == 'auto': #uses the threshold calculated by the internal method _calc_threshold
-                self.labels_ = (self.decision_scores_ > self.threshold_).astype(
-                    'int').ravel()
-            else:
-                self.threshold_ = self.indegree_t
-                self.labels_ = (self.decision_scores_ > self.threshold_).astype(
-                    'int').ravel()
-        # if this is a PyThresh object
-        else:
-            self.labels_ = self.contamination.eval(self.decision_scores_)
-            self.threshold_ = self.contamination.thresh_
-            if not self.threshold_:
-                self.threshold_ = np.sum(self.labels_) / len(self.labels_)
-
-        # calculate for predict_proba()
-
-        self._mu = np.mean(self.decision_scores_)
-        self._sigma = np.std(self.decision_scores_)
-
-        return self
+   
     
         
     def decision_function(self, X):
@@ -391,7 +340,7 @@ class ODIN(BaseDetector):
             
         else:
             #Find the kneighbors to calculate the distances across all datapoints
-            all_dist, _ = self.neigh_.kneighbors(X,k=self.n_neighbors,return_distance=True)
+            all_dist, _ = self.neigh_.kneighbors(X,n_neighbors=self.n_neighbors,return_distance=True)
        
             #Apply the selected distance method and update the l-value distance vector
             self.l_dist = self._get_dist_by_method(all_dist)
@@ -420,7 +369,7 @@ class ODIN(BaseDetector):
         """
         indegree_scores = np.zeros([d_matrix.shape[0]])
         
-        print("mean distance: " + str(np.mean(self.l_dist)))
+        #print("mean distance: " + str(np.mean(self.l_dist)))
         
         for i in range(d_matrix.shape[0]):
             dist_point_features = np.asarray(d_matrix[i]).reshape(1, d_matrix[i].shape[0])
