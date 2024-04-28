@@ -163,6 +163,8 @@ class ODIN(BaseDetector):
         self.n_jobs = n_jobs
         self.neigh_ = None
         self.tree_ = None
+        self.l_thresh = None
+
         
         if self.mode != 'auto' or self.mode != 'manual': 
             warn('There are only "auto" and "manual" mode'
@@ -247,7 +249,7 @@ class ODIN(BaseDetector):
         #Apply the selected distance method and update the l-value distance vector
         self.l_dist = self._get_dist_by_method(all_dist)
         
-        self.threshold_ = self._calc_threshold()
+        self.l_thresh = self._calc_threshold()
         
         #Calculate the indegree score: the functionality is inverse than the original "indegree score"
         #due tu API consistency (higher the indegree score, higher the outlierness probability in pyOD)
@@ -297,9 +299,12 @@ class ODIN(BaseDetector):
                        for i in range(1,self.l_dist.shape[0])]
             
         indegree_t = np.amax(differences) * self.t
-    
+        
+        print("indegree_threshold: " + str(indegree_t))
+        
+        #print(indegree_t)
         return indegree_t
-   
+
     
         
     def decision_function(self, X):
@@ -334,13 +339,13 @@ class ODIN(BaseDetector):
             self.l_dist = self._get_dist_by_method(all_dist)
             
             #update the threshold
-            self.threshold_ = self._calc_threshold()
+            self.l_thresh = self._calc_threshold()
             
             return self._calc_indegree(all_dist).ravel()
             
         else:
             #Find the kneighbors to calculate the distances across all datapoints
-            all_dist, _ = self.neigh_.kneighbors(X,n_neighbors=self.n_neighbors,return_distance=True)
+            all_dist, _ = self.neigh_.kneighbors(X,k=self.n_neighbors,return_distance=True)
        
             #Apply the selected distance method and update the l-value distance vector
             self.l_dist = self._get_dist_by_method(all_dist)
@@ -349,8 +354,6 @@ class ODIN(BaseDetector):
             self.threshold_ = self._calc_threshold()
             
             return self._calc_indegree(all_dist).ravel()
-
-
            
     def _calc_indegree(self,d_matrix):
         """ #TODO: comment
@@ -369,12 +372,12 @@ class ODIN(BaseDetector):
         """
         indegree_scores = np.zeros([d_matrix.shape[0]])
         
-        #print("mean distance: " + str(np.mean(self.l_dist)))
+        print("mean distance: " + str(np.mean(self.l_dist)))
         
         for i in range(d_matrix.shape[0]):
             dist_point_features = np.asarray(d_matrix[i]).reshape(1, d_matrix[i].shape[0])
             #the indegree number functionality is the opp
-            indegree_number = np.sum(dist_point_features > self.threshold_, axis=1)
+            indegree_number = np.sum(dist_point_features > self.l_thresh, axis=1)
             #TODO: remove
             #print(dist_point_features)
             #TODO: experimental
@@ -417,9 +420,6 @@ class ODIN(BaseDetector):
             elif self.method == 'median':
                 return np.median(dist_arr, axis=0)
             
-    
-    
-   
     
          
         
