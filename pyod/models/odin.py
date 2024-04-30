@@ -386,7 +386,7 @@ class ODIN(BaseDetector):
             #E.G: in(i)=w_i*mean(dist_features[i])
             
             if indegree_number == 0:
-                indegree_scores[i] = self.contamination * np.mean(dist_point_features)
+                indegree_scores[i] = self.t * np.mean(dist_point_features)
             else:
                 indegree_scores[i] = indegree_number * np.mean(dist_point_features)
              
